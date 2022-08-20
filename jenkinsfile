@@ -1,0 +1,432 @@
+pipeline {
+    agent none
+	options {
+        	buildDiscarder(logRotator(numToKeepStr: '45'))
+   	 }
+	environment {
+                    PRODUCT = "$NB_PRODUCT"
+                    HC_VERSION = "$NB_HC_VERSION"
+                    CSAR_PATH= "$WORKSPACE/ran_virtualization/csard"
+					HELM_PB_PKGPATH= "$WORKSPACE/bin/vnfpackage_phybypass/release/x86_64/usr/bin"
+                    HELM_OTA_PKGPATH= "$WORKSPACE/bin/vnfpackage_ota/release/x86_64/usr/bin"
+                    nbversion=' '
+                    ibversion=' '
+                    BRANCH = "$NB_BRANCH"
+                    CICD_Branch = 'Dev-Latest'
+                    L1_Branch= "$NB_L1_BRANCH"
+                    Build_machine= "docker-usvm3"
+	}	
+    stages{
+        stage('Build Reqs') {		
+			agent{ label { label "${Build_machine}"
+                				customWorkspace "PRG-BUILDS/$PRODUCT/"}	
+            }	
+            steps {
+			     sh  "git lfs install" 
+				 checkout scm: [$class: 'GitSCM', branches: [[name: "${CICD_Branch}"]], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'LocalBranch', localBranch: "**"], [$class: 'CloneOption', timeout: 30], [$class: 'RelativeTargetDirectory', relativeTargetDir: "/home/siqbuild/${BRANCH}/CICD"]], submoduleCfg: [], userRemoteConfigs: [[ url: 'ssh://git@stash.arrisi.com:7999/onecell5g/onecell-cicd.git']]]
+             				
+                    script{
+						    scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/Checkout/checkout.groovy"              
+                            scripts.checkoutOnecell5g()
+                            scripts.checkoutL1()
+                            scripts.checkoutCicd()
+							scripts.submoduleUpdate()
+							}
+                    
+					script{
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/PreCond/Precond.groovy"
+                            scripts.preconds()
+                            }
+                   script{
+                           scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/PostCond/Postcond.groovy"
+                           scripts.postcond()
+                            }        
+                            
+                   script{
+							nbversion = readFile("${WORKSPACE}/femto_tools/sw/build/SWReleaseBuildNumber.txt").trim()
+							ibversion = readFile("${WORKSPACE}/femto_tools/sw/build/SWReleaseIntBuildNumber.txt").trim()
+							sh """sed -i -e "s/pgmversion/${PRODUCT}."${nbversion}"/g" $WORKSPACE/CICD/OneCell5G/Scripts/Json/pgm_fix_build.json"""
+							sh  """echo "${nbversion}" | awk '\$0*=1' > ${WORKSPACE}/femto_tools/sw/build/hversion.txt """
+							hversion = readFile("${WORKSPACE}/femto_tools/sw/build/hversion.txt").trim()
+							sh "rm -rf /tmp/${PRODUCT}.${nbversion} && mkdir /tmp/${PRODUCT}.${nbversion}"
+                            WORKSPACE_PROMOTE = "/workspace/siqbuild/PRG-BUILDS/$BRANCH/${HC_VERSION}.${nbversion}/DUOTA"
+				env.PROD_VERSION = sh( script: "echo ${PRODUCT} |  cut -d '_' -f 3",returnStdout: true).trim()    
+                            	env.MAIL_VERSION = "${env.PROD_VERSION}.${nbversion}"		    
+				} 
+				  script{
+                             sh "cp $WORKSPACE/CICD/OneCell5G/Scripts/changesets.sh ."
+							 def CHGSETS = sh returnStatus: true, script: '$WORKSPACE/changesets.sh '
+							 if ((CHGSETS != 0)){
+									echo '[FAILURE] FailedToBuild CHANGE SETS '
+									error("failed to Calculate CHANGE SETS")  }} 
+			     script{
+							 env.email_files_changed2 = readFile("${WORKSPACE}/FILESCHANGED.txt").trim()
+							 env.email_changes2 = readFile("${WORKSPACE}/CHANGESETS.txt").trim()
+                            	 }
+                  withCredentials([usernamePassword(credentialsId: 'BB', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')])
+					{
+					script{
+                             sh "cp $WORKSPACE/CICD/OneCell5G/Scripts/jira_update.sh ."
+							 def JiraUpdates = sh returnStatus: true, script: '$WORKSPACE/jira_update.sh >> jira_update.log '
+							 if ((JiraUpdates != 0)){
+									echo '[FAILURE] FailedToBuild jira_updates'
+									  }} }           
+				    emailext(
+							to:"OneCell-DevOps-SW@commscope.com,AirvanaSIQ-ReleaseAnnouncements@commscope.com,#5G-SW-TechLeads@commscope.com",
+                      //    to:"subrata.patel@commscope.com,Vinay.Nuthipelly@commscope.com",
+ 						    subject: "${env.PROD_VERSION} STARTED BUILD '${PRODUCT}.${nbversion}'",
+                            mimeType: 'text/html',
+                            body: '${SCRIPT, template="managed:startMailOc5g"}',
+							recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+							)	
+				    
+					 
+            }								
+		}
+        stage('MainBuild'){
+            parallel {
+                stage('CUCP') {
+                    agent{ 
+                        label { 
+                            label "${Build_machine}"
+                			customWorkspace "PRG-BUILDS/$BRANCH/${HC_VERSION}.${nbversion}/CUCP/"
+                        }  
+                    }
+                    environment {
+                        PATH = "$PATH:/opt/cpp-grpc/grpc/bins/opt:/opt/cpp-grpc/grpc/bins/opt/protobuf:/opt/go/bin"
+                        PKG_CONFIG_PATH = "$PKG_CONFIG_PATH:/opt/cpp-grpc/grpc/third_party/protobuf/:/opt/cpp-grpc/grpc/libs/opt/pkgconfig/"
+                        HC_VERSION = "$NB_HC_VERSION"
+                        nbversion=' '
+                        ibversion=' '
+                        REPO='l1phy'
+                        GRADLE_USER_HOME="/home/siqbuild/$BUILD_NUMBER/.gradle/"
+                        STARLINGX_PATH= "$WORKSPACE/platform/starlingx/custom-patches"
+                        WINDRIVER_PATH= "$WORKSPACE/platform/windriver/custom-patches"
+                        KAFKA_CC_PATH= "ran_net/kafka_deployment/central_cloud"
+                        BRANCH = "$NB_BRANCH"
+						CICD_Branch='Dev-Latest'
+						L1_Branch = "$NB_L1_BRANCH"
+                    }
+                    steps {
+					  sh  "git lfs install"
+                     checkout scm: [$class: 'GitSCM', branches: [[name: "${CICD_Branch}"]], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'LocalBranch', localBranch: "**"], [$class: 'CloneOption', timeout: 30], [$class: 'RelativeTargetDirectory', relativeTargetDir: "/home/siqbuild/${BRANCH}/CICD"]], submoduleCfg: [], userRemoteConfigs: [[ url: 'ssh://git@stash.arrisi.com:7999/onecell5g/onecell-cicd.git']]]
+             	
+                        script{
+							cleanWs()
+						    scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/Checkout/checkout.groovy"              
+                            scripts.shellCheckout()
+							scripts.submoduleUpdate()
+							}	
+                        script{
+                             def resultB = sh returnStatus: true, script: '$WORKSPACE/build.sh -c > cleanupota.log'
+							}
+                        script{
+                            sh " echo BUILDING ONECELL5G"
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/6.5_NB.groovy"
+                            scripts.build_cucp_ota()
+                            scripts.build_cucp_phybypass()
+							}                        
+                        script{
+							script{
+                            sh " echo BUILDING LoggingPB"
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/ThirdParty/Loggingpods.groovy"
+							scripts.loggingServicesPB()
+							}
+                    }
+                }
+				}
+
+                stage('CUUP') {
+                    agent{ 
+                        label { 
+                            label "${Build_machine}"
+                			customWorkspace "PRG-BUILDS/$BRANCH/${HC_VERSION}.${nbversion}/CUUP"
+                        }  
+                    }
+                    environment {
+                        PATH = "$PATH:/opt/cpp-grpc/grpc/bins/opt:/opt/cpp-grpc/grpc/bins/opt/protobuf:/opt/go/bin"
+                        PKG_CONFIG_PATH = "$PKG_CONFIG_PATH:/opt/cpp-grpc/grpc/third_party/protobuf/:/opt/cpp-grpc/grpc/libs/opt/pkgconfig/"
+                        HC_VERSION = "$NB_HC_VERSION"
+                        nbversion=' '
+                        ibversion=' '
+                        REPO='l1phy'
+                        GRADLE_USER_HOME="/home/siqbuild/$BUILD_NUMBER/.gradle/"
+                        STARLINGX_PATH= "$WORKSPACE/platform/starlingx/custom-patches"
+                        WINDRIVER_PATH= "$WORKSPACE/platform/windriver/custom-patches"
+                        KAFKA_CC_PATH= "ran_net/kafka_deployment/central_cloud"
+                        BRANCH = "$NB_BRANCH"
+						CICD_Branch='Dev-Latest'
+						L1_Branch = "$NB_L1_BRANCH"
+                    }
+                    steps {
+					  sh  "git lfs install"
+                     checkout scm: [$class: 'GitSCM', branches: [[name: "${CICD_Branch}"]], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'LocalBranch', localBranch: "**"], [$class: 'CloneOption', timeout: 30], [$class: 'RelativeTargetDirectory', relativeTargetDir: "/home/siqbuild/${BRANCH}/CICD"]], submoduleCfg: [], userRemoteConfigs: [[ url: 'ssh://git@stash.arrisi.com:7999/onecell5g/onecell-cicd.git']]]
+             	
+                        script {
+							cleanWs()
+						    scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/Checkout/checkout.groovy"              
+                            scripts.shellCheckout()
+							scripts.submoduleUpdate()
+							}	
+                        script{
+                            def resultB = sh returnStatus: true, script: '$WORKSPACE/build.sh -c > cleanupota.log'
+							}
+                        script{
+                            sh " echo BUILDING ONECELL5G"
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/6.5_NB.groovy"
+                            scripts.build_cuup_ota()
+                            scripts.build_cuup_phybypass()
+							}
+                        script{
+							sh " echo BUILDING Logging OTA"
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/ThirdParty/Loggingpods.groovy"
+							scripts.loggingServicesOTA()
+							}
+                        script{
+							sh " echo BUILDING Nginx OTA"
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/ThirdParty/NginxCertM.groovy"
+                            scripts.nginxEgressServicesOTA()
+							}
+                        script{
+							sh " echo BUILDING VNFADP"
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/ThirdParty/VNF.groovy"
+                            scripts.vnfAdapterService()
+                            scripts.KubernetesDashboard()
+							}
+                        script{
+							sh " echo BUILDING STARLINGX-WINDRIVER"
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/ThirdParty/WindrivreStarlingX.groovy"
+                            scripts.starlinxWindriver()
+							}
+                        script{
+							sh " echo BUILDING IpsecOTA"
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/ThirdParty/Ipsec.groovy"
+                            scripts.ipsecGnBServiceOTA()
+							}
+                        script{
+							sh " echo BUILDING NginxPB"
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/ThirdParty/NginxCertM.groovy"
+                            scripts.nginxEgressServicesPB()
+							}
+                        script{
+							sh " echo BUILDING IpsecPB"
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/ThirdParty/Ipsec.groovy"
+                            scripts.ipsecGnbServicesPB()
+							}
+                        
+                    }
+                }
+                stage('DUOTA') {
+                    agent{ 
+                        label { 
+                            label "${Build_machine}"
+                			customWorkspace "PRG-BUILDS/$BRANCH/${HC_VERSION}.${nbversion}/DUOTA"
+                        }  
+                    }
+                    environment {
+                        PATH = "$PATH:/opt/cpp-grpc/grpc/bins/opt:/opt/cpp-grpc/grpc/bins/opt/protobuf:/opt/go/bin"
+                        PKG_CONFIG_PATH = "$PKG_CONFIG_PATH:/opt/cpp-grpc/grpc/third_party/protobuf/:/opt/cpp-grpc/grpc/libs/opt/pkgconfig/"
+                        HC_VERSION = "$NB_HC_VERSION"
+                        nbversion=' '
+                        ibversion=' '
+                        REPO='l1phy'
+                        GRADLE_USER_HOME="/home/siqbuild/$BUILD_NUMBER/.gradle/"
+                        BRANCH = "$NB_BRANCH"
+						CICD_Branch='Dev-Latest'
+						L1_Branch = "$NB_L1_BRANCH"
+                    }
+                    steps {
+					     sh  "git lfs install"
+                         checkout scm: [$class: 'GitSCM', branches: [[name: "${CICD_Branch}"]], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'LocalBranch', localBranch: "**"], [$class: 'CloneOption', timeout: 30], [$class: 'RelativeTargetDirectory', relativeTargetDir: "/home/siqbuild/${BRANCH}/CICD"]], submoduleCfg: [], userRemoteConfigs: [[ url: 'ssh://git@stash.arrisi.com:7999/onecell5g/onecell-cicd.git']]]
+             	
+                        script {
+							cleanWs()
+						    scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/Checkout/checkout.groovy"              
+                            scripts.shellCheckout()
+							scripts.submoduleUpdate()
+							}	
+                        script{
+                            def resultB = sh returnStatus: true, script: '$WORKSPACE/build.sh -c > cleanupota.log'
+							}
+                        script{
+                            sh " echo BUILDING ONECELL5G"
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/6.5_NB.groovy"
+                            scripts.build_du_ota()
+                        }
+                    }
+                }
+                stage('DUPB') {
+                    agent{ 
+                        label { 
+                            label "${Build_machine}"
+                			customWorkspace "PRG-BUILDS/$BRANCH/${HC_VERSION}.${nbversion}/DUPB"
+                        }  
+                    }
+                    environment {
+                        PATH = "$PATH:/opt/cpp-grpc/grpc/bins/opt:/opt/cpp-grpc/grpc/bins/opt/protobuf:/opt/go/bin"
+                        PKG_CONFIG_PATH = "$PKG_CONFIG_PATH:/opt/cpp-grpc/grpc/third_party/protobuf/:/opt/cpp-grpc/grpc/libs/opt/pkgconfig/"
+                        HC_VERSION = "$NB_HC_VERSION"
+                        nbversion=' '
+                        ibversion=' '
+                        REPO='l1phy'
+                        GRADLE_USER_HOME="/home/siqbuild/$BUILD_NUMBER/.gradle/"
+                        BRANCH = "$NB_BRANCH"
+						CICD_Branch='Dev-Latest'
+						L1_Branch = "$NB_L1_BRANCH"
+                    }
+                    steps {
+					
+					  sh  "git lfs install"
+                     checkout scm: [$class: 'GitSCM', branches: [[name: "${CICD_Branch}"]], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'LocalBranch', localBranch: "**"], [$class: 'CloneOption', timeout: 30], [$class: 'RelativeTargetDirectory', relativeTargetDir: "/home/siqbuild/${BRANCH}/CICD"]], submoduleCfg: [], userRemoteConfigs: [[ url: 'ssh://git@stash.arrisi.com:7999/onecell5g/onecell-cicd.git']]]
+             	
+                       script {
+							cleanWs()
+						    scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/Checkout/checkout.groovy"              
+                            scripts.shellCheckout()
+							scripts.submoduleUpdate()
+							}	
+                        script{
+                           def resultB = sh returnStatus: true, script: '$WORKSPACE/build.sh -c > cleanupota.log'
+							}
+                        script{
+                            sh " echo BUILDING ONECELL5G"
+                            scripts=load "/home/siqbuild/$BRANCH/CICD/OneCell5G/Groovy/6.5_NB.groovy"
+                            scripts.build_du_phybypass()
+								}
+                    }
+                }
+            }
+         }
+		
+        stage ('Promote') {
+				agent{ 
+                        label { 
+                            label 'US-vm4'
+                            	customWorkspace "PRG-BUILDS/CICD/" }  }
+                    environment {
+                        PATH = "$PATH:/opt/cpp-grpc/grpc/bins/opt:/opt/cpp-grpc/grpc/bins/opt/protobuf:/opt/go/bin"
+                        PKG_CONFIG_PATH = "$PKG_CONFIG_PATH:/opt/cpp-grpc/grpc/third_party/protobuf/:/opt/cpp-grpc/grpc/libs/opt/pkgconfig/"
+                         HC_VERSION = "$NB_HC_VERSION"
+                        REPO='l1phy'
+                        GRADLE_USER_HOME="/home/siqbuild/$BUILD_NUMBER/.gradle/"
+                        BRANCH = "$NB_BRANCH"
+						CICD_Branch='Dev-Latest'
+						L1_Branch = "$NB_L1_BRANCH"
+                       	CSAR_PATH= "$WORKSPACE_PROMOTE/ran_virtualization/csard"
+						HELM_OTA_FDD_PKGPATH= "$WORKSPACE_PROMOTE/bin/vnfpackage_ota_fdd/release/x86_64/usr/bin"
+						HELM_PB_FDD_PKGPATH= "$WORKSPACE_PROMOTE/bin/vnfpackage_phybypass_fdd/release/x86_64/usr/bin"
+                        nbversion=' '
+                        ibversion=' '
+                        }
+					steps{
+                    	//build helmcharts and CSAR's of onecell5g
+					
+                        script{
+           def result_HC_phybypass = sh returnStatus: true, script: "cd ${WORKSPACE_PROMOTE}/ran_virtualization/stack_virtualization/pod_definitions && BUILD_SUFFIX=prpb BUILD=release PLATFORM=phybypass DUPLEXMODE=fdd make > HC_phybypass.log"
+      	   def result_HC_ota = sh returnStatus: true, script: "cd ${WORKSPACE_PROMOTE}/ran_virtualization/stack_virtualization/pod_definitions && BUILD_SUFFIX=prota BUILD=release PLATFORM=ota DUPLEXMODE=fdd make > HC_OTA.log"
+		  // def result_DU_VNF_phybypass = sh returnStatus: true, script: "cd ${WORKSPACE_PROMOTE}/ran_virtualization/stack_virtualization/container_images/du_pod/ &&  BUILD=release PLATFORM=phybypass DUPLEXMODE=fdd make > DU_vnf_phybypass.log"
+           if ((result_HC_phybypass != 0) && (result_HC_ota != 0)){
+           echo '[FAILURE] FailedToBuild Helmcharts '
+             error("failed to build Helmcharts")  }}
+                     script{
+			def result1 = sh returnStatus: true, script: "cd $CSAR_PATH/cu_cp/ && ./build.sh $HELM_OTA_FDD_PKGPATH/cs-gnb-cu-cp-0.1.0*-prota.tgz ${HC_VERSION}.${nbversion}"
+			def result2 = sh returnStatus: true, script: "cd $CSAR_PATH/cu_up/ && ./build.sh $HELM_OTA_FDD_PKGPATH/cs-gnb-cu-up-0.1.0*-prota.tgz ${HC_VERSION}.${nbversion}"
+			def result3 = sh returnStatus: true, script: "cd $CSAR_PATH/du/ && ./build.sh $HELM_OTA_FDD_PKGPATH/cs-gnb-du-0.1.0*-prota.tgz ${HC_VERSION}.${nbversion}"
+			//def result4 = sh returnStatus: true, script: "cd ${WORKSPACE_PROMOTE}/l1phy/5gnr_platform/virt/csard/ptp/ && ./build.sh $HELM_OTA_FDD_PKGPATH/cs-gnb-ptp-0.1.0*-prota.tgz ${HC_VERSION}.${nbversion}"
+			//def result5 = sh returnStatus: true, script: "cp $CSAR_PATH/cu_up/csar/*.csar ${WORKSPACE_PROMOTE}/bin/ && cp $CSAR_PATH/cu_cp/csar/*.csar ${WORKSPACE_PROMOTE}/bin/ && cp $CSAR_PATH/du/csar/*.csar $WORKSPACE_PROMOTE/bin/ && cp ${WORKSPACE_PROMOTE}/l1phy/5gnr_platform/virt/csard/ptp/csar/*.csar ${WORKSPACE_PROMOTE}/bin/ "
+            if((result1 != 0) || (result2 != 0) || (result3 != 0)) {
+			echo '[FAILURE] FailedToBuild CSAR Packages'
+			currentBuild.result = 'FAILURE'
+			error("Failed to build")}}   
+					//copy Onecell5g CSAR's
+					sh "cp $CSAR_PATH/cu_up/csar/*.csar /tmp/${PRODUCT}.${nbversion}/ && cp $CSAR_PATH/cu_cp/csar/*.csar /tmp/${PRODUCT}.${nbversion}/ && cp $CSAR_PATH/du/csar/*.csar /tmp/${PRODUCT}.${nbversion}/"
+						
+					//docker and HC push
+					sh "cp /workspace/siqbuild/PRG-BUILDS/${PRODUCT}/CICD/OneCell5G/Docker/Apps/VNF/vnf_push_parallel_6.5_containers.sh $WORKSPACE_PROMOTE/femto_tools/sw/build/  && chmod 775 $WORKSPACE_PROMOTE/femto_tools/sw/build/vnf_push_parallel_6.5_containers.sh"
+                  	withCredentials([usernamePassword(credentialsId: 'DD', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')])
+					{
+					script{ 
+							sh ''' docker login -u $USERNAME -p $PASSWORD  oc5g-docker-prod-suwanee.binaryrepo-east.arrisi.com '''
+                            def resultA = sh returnStatus: true, script: "cd ${WORKSPACE_PROMOTE} && ./femto_tools/sw/build/vnf_push_parallel_6.5_containers.sh PROTA"
+							def resultB = sh returnStatus: true, script: "cd ${WORKSPACE_PROMOTE} && ./femto_tools/sw/build/vnf_push_parallel_6.5_containers.sh PRPB"
+							def resultC = sh returnStatus: true, script: "cd ${WORKSPACE_PROMOTE} && ./femto_tools/sw/build/vnf_push_parallel_6.5_containers.sh HCOTA"
+							def resultD = sh returnStatus: true, script: "cd ${WORKSPACE_PROMOTE} && ./femto_tools/sw/build/vnf_push_parallel_6.5_containers.sh HCPB"
+							if((resultA != 0) || (resultB != 0)){
+							    echo '[FAILURE] FailedToBuild and push docker images '
+							    currentBuild.result = 'FAILURE'
+							    error("Failed to build at OTA")  
+                            }
+                    }}
+                    script{
+                        def resultA = sh returnStatus: true, script: "cd /tmp/${PRODUCT}.${nbversion}/ && md5sum *ota.tgz >> OTA-helmcharts-md5.txt && md5sum *pb.tgz >> PB-helmcharts-md5.txt "
+                        def resultB = sh returnStatus: true, script: "cd /tmp/${PRODUCT}.${nbversion}/ && md5sum *csar >> CSAR-md5.txt "
+                        def resultC = sh returnStatus: true, script: " cd /tmp/${PRODUCT}.${nbversion}/ && zip -r ${HC_VERSION}.${nbversion}-CSAR.zip *.csar "
+                        if ((resultA != 0) || (resultB != 0) || (resultC != 0)){
+                            echo '[FAILURE] FailedToBuild failed to run md5 at OTA'
+                            currentBuild.result = 'FAILURE'
+                            error("failed to run md5 at OTA")}
+						}
+                    script{
+                       // jfrog()
+                        scripts=load "/workspace/siqbuild/PRG-BUILDS/CICD/OneCell5G/Groovy/jfrog.groovy"
+						scripts.jfrog()
+                    }
+                   
+                    script{
+				url = ("http://10.53.159.160:8080/jenkins/buildByToken/buildWithParameters?token=noitamotuA'&'job=Integration-Test-Suite-6-5'&'Helmchart=0.1.0-siqbuild.${HC_VERSION}.${hversion}.ota.fdd-prpb'&'Version=${PRODUCT}.${nbversion}'&'Mode=OTA'&'Branch=${BRANCH}'&'Testsuite=Ota")
+				url2 = ("http://10.53.159.160:8080/jenkins/buildByToken/buildWithParameters?token=noitamotuA'&'job=Integration-Test-Suite-6-5'&'Helmchart=0.1.0-siqbuild.${HC_VERSION}.${hversion}.phybypass.fdd-prpb'&'Version=${PRODUCT}.${nbversion}'&'Mode=PhyByPass'&'Branch=${BRANCH}'&'Testsuite=PhyByPass")
+				url3 = ("http://10.53.159.160:8080/jenkins/buildByToken/buildWithParameters?token=noitamotuA'&'job=Integration-Test-Suite-6-5'&'Helmchart=0.1.0-siqbuild.${HC_VERSION}.${hversion}.ota.tdd-prpb'&'Version=${PRODUCT}.${nbversion}'&'Mode=OTA'&'Branch=${BRANCH}'&'Testsuite=Ota")
+				url4 = ("http://10.53.159.160:8080/jenkins/buildByToken/buildWithParameters?token=noitamotuA'&'job=Integration-Test-Suite-6-5'&'Helmchart=0.1.0-siqbuild.${HC_VERSION}.${hversion}.phybypass.tdd-prpb'&'Version=${PRODUCT}.${nbversion}'&'Mode=PhyByPass'&'Branch=${BRANCH}'&'Testsuite=PhyByPass")
+                   }
+                   	// sh "curl -I -u automation:115be5598c8cb85b790e4020bbe95d58e8 $url"
+                    // sh "curl -I -u automation:115be5598c8cb85b790e4020bbe95d58e8 $url2"    
+					sh "curl -I -u automation:115be5598c8cb85b790e4020bbe95d58e8 $url3"
+                    sh "curl -I -u automation:115be5598c8cb85b790e4020bbe95d58e8 $url4"
+					// cleaning up tmp folders
+					// sh "rm -rf /workspace/agent/PRG-Builds/OTA/${HC_VERSION}.${nbversion}@tmp && rm -rf /workspace/agent/PRG-Builds/PB/${HC_VERSION}.${nbversion}@tmp"
+					// cleaning up obj folder inside workspace                    
+					// sh "cd /workspace/agent/PRG-Builds/OTA/${HC_VERSION}.${nbversion} &&  find . -type d -name 'obj' -exec rm -r {} +"
+                    // sh "cd /workspace/agent/PRG-Builds/PB/${HC_VERSION}.${nbversion} &&  find . -type d -name 'obj' -exec rm -r {} +"
+				}
+                
+			}
+			}
+			
+			 post {
+				success{
+					node("${Build_machine}"){
+						dir("/workspace/siqbuild/PRG-BUILDS/${PRODUCT}"){
+						    script{
+						        scripts=load "/workspace/siqbuild/PRG-BUILDS/${PRODUCT}/CICD/OneCell5G/Groovy/PostCond/Commit_LastSuccessHash.groovy"
+					            scripts.commit_lastsuccesfulHash()
+						    }
+						}
+					}
+				}
+				always {
+                       node("${Build_machine}"){
+						script{
+                        failed_comp()
+                        }
+					}
+                
+                    
+					emailext (
+                     
+						to:"OneCell-DevOps-SW@commscope.com,AirvanaSIQ-ReleaseAnnouncements@commscope.com,#5G-SW-TechLeads@commscope.com",
+                    //	to:"subrata.patel@commscope.com,Vinay.Nuthipelly@commscope.com",
+                        subject: "${env.PROD_VERSION} ${currentBuild.currentResult} BUILD '${PRODUCT}.${nbversion}'",
+                    	mimeType: 'text/html',
+                    	body: '${SCRIPT, template="managed:resultMailOc5g"}',
+						recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+							)
+						}		
+	        }
+          
+    
+}
+
+def failed_comp(){
+    env.failed_comp = sh returnStdout: true, script: "cat /workspace/siqbuild/PRG-BUILDS/$BRANCH/${HC_VERSION}.${nbversion}/failedComponent.txt".trim()
+    echo "${failed_comp}"
+}
