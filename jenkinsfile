@@ -1,3 +1,4 @@
+addded shrdhamayeee TC001 added new columen added trading app
 pipeline {
     agent none
 	options {
